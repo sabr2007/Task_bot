@@ -1,3 +1,9 @@
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+
+
 from typing import List, Tuple, Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -256,8 +262,25 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+def start_health_server():
+    """Простой HTTP-сервер для Render, чтобы был открыт порт."""
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+
 def main():
     init_db()
+
+    # Запускаем HTTP-сервер для Render в отдельном потоке
+    threading.Thread(target=start_health_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -269,7 +292,3 @@ def main():
 
     print("Бот запущен. Нажми Ctrl+C, чтобы остановить.")
     app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
