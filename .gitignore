@@ -1,0 +1,16 @@
+# venv
+.venv/
+venv/
+
+# python кеши
+__pycache__/
+*.pyc
+
+# env (секреты)
+.env
+
+# база задач
+tasks.db
+
+# прочее
+*.log
