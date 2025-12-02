@@ -20,16 +20,19 @@ from telegram.ext import (
 from dateparser.search import search_dates
 
 from config import TELEGRAM_BOT_TOKEN, TIMEZONE
-from db import init_db, add_task, get_tasks, delete_task
+from db import init_db, add_task, get_tasks, delete_task, get_archived_tasks, set_task_done
 
 
 LOCAL_TZ = ZoneInfo(TIMEZONE)
 
-# Клавиатура внизу чата
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [["Показать задачи", "Удалить задачу"]],
+    [
+        ["Показать задачи", "Удалить задачу"],
+        ["Отметить выполненной", "Архив задач"],
+    ],
     resize_keyboard=True,
 )
+
 
 
 def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
@@ -89,7 +92,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # Кнопки
+    
     if text == "Показать задачи":
         await show_tasks(update, context)
         return
@@ -97,6 +100,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Удалить задачу":
         await ask_delete_task(update, context)
         return
+
+    if text == "Архив задач":
+        await show_archive(update, context)
+        return
+
+    if text == "Отметить выполненной":
+        await ask_done_task(update, context)
+        return
+
 
     # Игнор неизвестных команд
     if text.startswith("/"):
@@ -168,6 +180,37 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "Твои задачи:\n\n" + "\n".join(lines)
     await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
 
+async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список выполненных задач пользователя."""
+    if not update.message:
+        return
+
+    user_id = update.effective_user.id
+    tasks: List[Tuple[int, str, Optional[str]]] = get_archived_tasks(user_id)
+
+    if not tasks:
+        await update.message.reply_text(
+            "Архив задач пуст 🙂",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    lines = []
+    for idx, (task_id, text, due_at_iso) in enumerate(tasks, start=1):
+        if due_at_iso:
+            try:
+                due_dt = datetime.fromisoformat(due_at_iso)
+                due_local = due_dt.astimezone(LOCAL_TZ)
+                due_str = due_local.strftime("%d.%m %H:%M")
+                lines.append(f"{idx}. {text} (до {due_str})")
+            except Exception:
+                lines.append(f"{idx}. {text}")
+        else:
+            lines.append(f"{idx}. {text}")
+
+    msg = "Архив выполненных задач:\n\n" + "\n".join(lines)
+    await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+
 
 async def ask_delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -200,6 +243,38 @@ async def ask_delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
     )
 
+async def ask_done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает задачи с inline-кнопками для отметки 'выполнено'."""
+    if not update.message:
+        return
+
+    user_id = update.effective_user.id
+    tasks: List[Tuple[int, str, Optional[str]]] = get_tasks(user_id)
+
+    if not tasks:
+        await update.message.reply_text(
+            "Пока нет активных задач, которые можно отметить выполненными 🙂",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    keyboard = []
+    for task_id, text, _ in tasks:
+        label = text if len(text) <= 25 else text[:22] + "..."
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"✅ {label}", callback_data=f"done:{task_id}"
+                )
+            ]
+        )
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Выбери задачу, которую хочешь отметить выполненной:",
+        reply_markup=reply_markup,
+    )
+
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -207,38 +282,72 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer()
-
     data = query.data or ""
-    if not data.startswith("del:"):
-        return
 
-    try:
-        task_id = int(data.split(":", maxsplit=1)[1])
-    except ValueError:
-        return
+    # Удаление задачи
+    if data.startswith("del:"):
+        try:
+            task_id = int(data.split(":", maxsplit=1)[1])
+        except ValueError:
+            return
 
-    user_id = query.from_user.id
-    delete_task(user_id=user_id, task_id=task_id)
+        user_id = query.from_user.id
+        delete_task(user_id=user_id, task_id=task_id)
 
-    tasks = get_tasks(user_id)
-    if not tasks:
-        text = "Задача удалена ✅\n\nСписок задач теперь пуст."
-    else:
-        lines = []
-        for idx, (tid, ttext, due_at_iso) in enumerate(tasks, start=1):
-            if due_at_iso:
-                try:
-                    due_dt = datetime.fromisoformat(due_at_iso)
-                    due_local = due_dt.astimezone(LOCAL_TZ)
-                    due_str = due_local.strftime("%d.%m %H:%M")
-                    lines.append(f"{idx}. {ttext} (до {due_str})")
-                except Exception:
+        tasks = get_tasks(user_id)
+        if not tasks:
+            text = "Задача удалена ✅\n\nСписок задач теперь пуст."
+        else:
+            lines = []
+            for idx, (tid, ttext, due_at_iso) in enumerate(tasks, start=1):
+                if due_at_iso:
+                    try:
+                        due_dt = datetime.fromisoformat(due_at_iso)
+                        due_local = due_dt.astimezone(LOCAL_TZ)
+                        due_str = due_local.strftime("%d.%m %H:%M")
+                        lines.append(f"{idx}. {ttext} (до {due_str})")
+                    except Exception:
+                        lines.append(f"{idx}. {ttext}")
+                else:
                     lines.append(f"{idx}. {ttext}")
-            else:
-                lines.append(f"{idx}. {ttext}")
-        text = "Задача удалена ✅\n\nАктуальный список задач:\n\n" + "\n".join(lines)
+            text = "Задача удалена ✅\n\nАктуальный список задач:\n\n" + "\n".join(lines)
 
-    await query.edit_message_text(text=text)
+        await query.edit_message_text(text=text)
+        return
+
+    # Отметка задачи выполненной
+    if data.startswith("done:"):
+        try:
+            task_id = int(data.split(":", maxsplit=1)[1])
+        except ValueError:
+            return
+
+        user_id = query.from_user.id
+        set_task_done(user_id=user_id, task_id=task_id)
+
+        tasks = get_tasks(user_id)
+        if not tasks:
+            text = "Задача отмечена выполненной ✅\n\nАктивных задач больше нет."
+        else:
+            lines = []
+            for idx, (tid, ttext, due_at_iso) in enumerate(tasks, start=1):
+                if due_at_iso:
+                    try:
+                        due_dt = datetime.fromisoformat(due_at_iso)
+                        due_local = due_dt.astimezone(LOCAL_TZ)
+                        due_str = due_local.strftime("%d.%m %H:%M")
+                        lines.append(f"{idx}. {ttext} (до {due_str})")
+                    except Exception:
+                        lines.append(f"{idx}. {ttext}")
+                else:
+                    lines.append(f"{idx}. {ttext}")
+            text = (
+                "Задача отмечена выполненной ✅\n\n"
+                "Актуальный список активных задач:\n\n" + "\n".join(lines)
+            )
+
+        await query.edit_message_text(text=text)
+        return
 
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -254,6 +363,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
         chat_id=chat_id,
         text=f"⏰ Напоминание:\n\n{task_text}",
     )
+
 
 
 def main():

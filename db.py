@@ -9,7 +9,7 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Базовая таблица (если нет)
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS tasks (
@@ -18,10 +18,13 @@ def init_db():
             text TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             due_at TEXT,
-            notified INTEGER DEFAULT 0
+            notified INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'active',
+            completed_at TEXT
         )
         """
     )
+
 
     # На случай, если таблица уже была без новых полей — аккуратный апгрейд:
     cursor.execute("PRAGMA table_info(tasks)")
@@ -32,6 +35,11 @@ def init_db():
 
     if "notified" not in cols:
         cursor.execute("ALTER TABLE tasks ADD COLUMN notified INTEGER DEFAULT 0")
+    if "status" not in cols:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN status TEXT DEFAULT 'active'")
+
+    if "completed_at" not in cols:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
 
     conn.commit()
     conn.close()
@@ -57,7 +65,31 @@ def get_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT id, text, due_at FROM tasks WHERE user_id = ? ORDER BY id DESC",
+        """
+        SELECT id, text, due_at FROM tasks
+        WHERE user_id = ?
+          AND (status IS NULL OR status = 'active')
+        ORDER BY id DESC
+        """,
+        (user_id,),
+    )
+
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def get_archived_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
+    """Возвращает список выполненных задач пользователя."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, text, due_at FROM tasks
+        WHERE user_id = ?
+          AND status = 'done'
+        ORDER BY completed_at DESC, id DESC
+        """,
         (user_id,),
     )
 
@@ -78,3 +110,23 @@ def delete_task(user_id: int, task_id: int):
 
     conn.commit()
     conn.close()
+
+def set_task_done(user_id: int, task_id: int):
+    """Отмечает задачу выполненной."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE tasks
+        SET status = 'done',
+            completed_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ?
+        """,
+        (task_id, user_id),
+    )
+
+    conn.commit()
+    conn.close()
+    
+
