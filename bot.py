@@ -187,10 +187,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data={"task_id": task_id, "task_text": task_text},
         )
 
+        # Предложение выбрать, за сколько времени напомнить
+        keyboard = [
+            [
+                InlineKeyboardButton("За 5 минут", callback_data=f"set_remind:{task_id}:5"),
+                InlineKeyboardButton("За 10 минут", callback_data=f"set_remind:{task_id}:10"),
+            ],
+            [
+                InlineKeyboardButton("За 1 час", callback_data=f"set_remind:{task_id}:60"),
+            ],
+            [
+                InlineKeyboardButton("Только в момент дедлайна", callback_data=f"set_remind:{task_id}:exact"),
+            ],
+        ]
+
         await update.message.reply_text(
-            "Задача сохранена ✅\nНапоминание поставлено ⏰",
-            reply_markup=MAIN_KEYBOARD,
+            "Задача сохранена ✅\nВыберите, за сколько времени напомнить:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
+
     else:
         await update.message.reply_text(
             "Задача сохранена ✅",
@@ -402,7 +417,64 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Установка времени напоминания
+    if data.startswith("set_remind:"):
+        _, task_id_str, mode = data.split(":")
 
+        try:
+            task_id = int(task_id_str)
+        except ValueError:
+            return
+
+        row = get_task(query.from_user.id, task_id)
+        if not row:
+            await query.edit_message_text("Задача не найдена.")
+            return
+
+        _tid, task_text, due_iso = row
+        if not due_iso:
+            await query.edit_message_text("У задачи нет дедлайна — напоминание невозможно.")
+            return
+
+        due_dt = datetime.fromisoformat(due_iso).astimezone(LOCAL_TZ)
+        now = datetime.now(tz=LOCAL_TZ)
+
+        # Режим: напомнить В МОМЕНТ дедлайна
+        if mode == "exact":
+            delay = (due_dt - now).total_seconds()
+            context.job_queue.run_once(
+                send_reminder,
+                when=delay,
+                chat_id=query.from_user.id,
+                data={"task_id": task_id, "task_text": task_text},
+            )
+
+            await query.edit_message_text(
+                f"Напоминание придёт в момент дедлайна: {due_dt.strftime('%H:%M')} ⏰"
+            )
+            return
+
+        # Режим: заранее
+        minutes = int(mode)
+        remind_time = due_dt - timedelta(minutes=minutes)
+
+        # если напоминание уже "прошло" → переносим на ближайшие 5 сек
+        if remind_time <= now:
+            remind_time = now + timedelta(seconds=5)
+
+        delay = (remind_time - now).total_seconds()
+
+        context.job_queue.run_once(
+            send_reminder,
+            when=delay,
+            chat_id=query.from_user.id,
+            data={"task_id": task_id, "task_text": task_text},
+        )
+
+        await query.edit_message_text(
+            f"Напоминание будет отправлено в {remind_time.strftime('%H:%M')} ⏰"
+        )
+        return
 
     # Удаление задачи
     if data.startswith("del:"):
