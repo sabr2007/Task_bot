@@ -1,5 +1,5 @@
 from typing import List, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -20,7 +20,16 @@ from telegram.ext import (
 from dateparser.search import search_dates
 
 from config import TELEGRAM_BOT_TOKEN, TIMEZONE
-from db import init_db, add_task, get_tasks, delete_task, get_archived_tasks, set_task_done
+from db import (
+    init_db,
+    add_task,
+    get_tasks,
+    delete_task,
+    get_archived_tasks,
+    set_task_done,
+    get_users_with_tasks,
+)
+
 
 
 LOCAL_TZ = ZoneInfo(TIMEZONE)
@@ -33,6 +42,41 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+def format_tasks_message(
+    title: str,
+    tasks: List[Tuple[int, str, Optional[str]]],
+) -> str:
+    """Формирует текст со списком задач, разделённых на с дедлайном и без."""
+    if not tasks:
+        return f"{title}:\n\n(пока пусто)"
+
+    with_deadline: List[str] = []
+    without_deadline: List[str] = []
+
+    for _task_id, text, due_at_iso in tasks:
+        if due_at_iso:
+            try:
+                due_dt = datetime.fromisoformat(due_at_iso)
+                due_local = due_dt.astimezone(LOCAL_TZ)
+                due_str = due_local.strftime("%d.%m %H:%M")
+                item = f"{text} (до {due_str})"
+            except Exception:
+                item = text
+            with_deadline.append(item)
+        else:
+            without_deadline.append(text)
+
+    parts: List[str] = [f"{title}:\n"]
+
+    if with_deadline:
+        lines = [f"{i}. {t}" for i, t in enumerate(with_deadline, start=1)]
+        parts.append("🕒 Задачи с дедлайном:\n" + "\n".join(lines) + "\n")
+
+    if without_deadline:
+        lines = [f"{i}. {t}" for i, t in enumerate(without_deadline, start=1)]
+        parts.append("📝 Без дедлайна:\n" + "\n".join(lines))
+
+    return "\n".join(parts).strip()
 
 
 def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
@@ -164,21 +208,9 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    lines = []
-    for idx, (task_id, text, due_at_iso) in enumerate(tasks, start=1):
-        if due_at_iso:
-            try:
-                due_dt = datetime.fromisoformat(due_at_iso)
-                due_local = due_dt.astimezone(LOCAL_TZ)
-                due_str = due_local.strftime("%d.%m %H:%M")
-                lines.append(f"{idx}. {text} (до {due_str})")
-            except Exception:
-                lines.append(f"{idx}. {text}")
-        else:
-            lines.append(f"{idx}. {text}")
-
-    msg = "Твои задачи:\n\n" + "\n".join(lines)
+    msg = format_tasks_message("Твои задачи", tasks)
     await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+
 
 async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список выполненных задач пользователя."""
@@ -349,6 +381,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text=text)
         return
 
+async def send_daily_digest(context: ContextTypes.DEFAULT_TYPE):
+    """Утренний дайджест задач всем пользователям с активными задачами."""
+    user_ids = get_users_with_tasks()
+
+    if not user_ids:
+        return
+
+    for user_id in user_ids:
+        tasks = get_tasks(user_id)
+        if not tasks:
+            continue
+
+        msg = format_tasks_message(
+            "Утренний дайджест задач на сегодня",
+            tasks,
+        )
+
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=msg,
+            reply_markup=MAIN_KEYBOARD,
+        )
+
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -376,6 +431,13 @@ def main():
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
+    # Ежедневный дайджест в 07:30 по локальному времени
+    if app.job_queue is not None:
+        app.job_queue.run_daily(
+            send_daily_digest,
+            time=dtime(hour=7, minute=30, tzinfo=LOCAL_TZ),
+            name="daily_digest",
+        )
 
     print("Бот запущен. Нажми Ctrl+C, чтобы остановить.")
     app.run_polling()

@@ -74,6 +74,24 @@ def get_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
         (user_id,),
     )
 
+def get_users_with_tasks() -> List[int]:
+    """Возвращает id пользователей, у которых есть активные задачи."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT DISTINCT user_id
+        FROM tasks
+        WHERE status IS NULL OR status = 'active'
+        """
+    )
+
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -128,5 +146,5 @@ def set_task_done(user_id: int, task_id: int):
 
     conn.commit()
     conn.close()
-    
+
 
