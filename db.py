@@ -60,7 +60,7 @@ def add_task(user_id: int, text: str, due_at_iso: Optional[str] = None):
 
 
 def get_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
-    """Возвращает список задач пользователя: (id, text, due_at_iso)."""
+    """Возвращает список активных задач пользователя: (id, text, due_at_iso)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -73,6 +73,11 @@ def get_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
         """,
         (user_id,),
     )
+
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
 
 def get_users_with_tasks() -> List[int]:
     """Возвращает id пользователей, у которых есть активные задачи."""
@@ -91,10 +96,6 @@ def get_users_with_tasks() -> List[int]:
     conn.close()
     return [row[0] for row in rows]
 
-
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
 
 def get_archived_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
     """Возвращает список выполненных задач пользователя."""
