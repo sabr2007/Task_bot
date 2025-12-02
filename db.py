@@ -45,8 +45,8 @@ def init_db():
     conn.close()
 
 
-def add_task(user_id: int, text: str, due_at_iso: Optional[str] = None):
-    """Добавляет задачу в базу. due_at_iso — строка ISO или None."""
+def add_task(user_id: int, text: str, due_at_iso: Optional[str] = None) -> int:
+    """Добавляет задачу в базу и возвращает её ID."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -55,8 +55,11 @@ def add_task(user_id: int, text: str, due_at_iso: Optional[str] = None):
         (user_id, text, due_at_iso),
     )
 
+    task_id = cursor.lastrowid
+
     conn.commit()
     conn.close()
+    return task_id
 
 
 def get_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
@@ -77,6 +80,42 @@ def get_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+def get_task(user_id: int, task_id: int) -> Optional[Tuple[int, str, Optional[str]]]:
+    """Возвращает одну задачу пользователя по ID или None."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, text, due_at
+        FROM tasks
+        WHERE id = ? AND user_id = ?
+        """,
+        (task_id, user_id),
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def update_task_due(user_id: int, task_id: int, due_at_iso: Optional[str]):
+    """Обновляет дедлайн задачи."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE tasks
+        SET due_at = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        (due_at_iso, task_id, user_id),
+    )
+
+    conn.commit()
+    conn.close()
 
 
 def get_users_with_tasks() -> List[int]:

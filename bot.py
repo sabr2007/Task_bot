@@ -1,5 +1,5 @@
 from typing import List, Tuple, Optional
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -28,6 +28,8 @@ from db import (
     get_archived_tasks,
     set_task_done,
     get_users_with_tasks,
+    get_task,
+    update_task_due,
 )
 
 
@@ -172,7 +174,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     due_at_iso = due_dt.isoformat() if due_dt is not None else None
 
     # Сохраняем
-    add_task(user_id=user_id, text=task_text, due_at_iso=due_at_iso)
+    task_id = add_task(user_id=user_id, text=task_text, due_at_iso=due_at_iso)
+
 
     # Ставим напоминание, если есть дата
     if due_dt is not None and context.job_queue is not None:
@@ -181,8 +184,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_reminder,
             when=delta_seconds,
             chat_id=user_id,
-            data={"task_text": task_text},
+            data={"task_id": task_id, "task_text": task_text},
         )
+
         await update.message.reply_text(
             "Задача сохранена ✅\nНапоминание поставлено ⏰",
             reply_markup=MAIN_KEYBOARD,
@@ -227,21 +231,9 @@ async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    lines = []
-    for idx, (task_id, text, due_at_iso) in enumerate(tasks, start=1):
-        if due_at_iso:
-            try:
-                due_dt = datetime.fromisoformat(due_at_iso)
-                due_local = due_dt.astimezone(LOCAL_TZ)
-                due_str = due_local.strftime("%d.%m %H:%M")
-                lines.append(f"{idx}. {text} (до {due_str})")
-            except Exception:
-                lines.append(f"{idx}. {text}")
-        else:
-            lines.append(f"{idx}. {text}")
-
-    msg = "Архив выполненных задач:\n\n" + "\n".join(lines)
+    msg = format_tasks_message("Архив выполненных задач", tasks)
     await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+
 
 
 async def ask_delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -315,6 +307,102 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     data = query.data or ""
+
+    # Отметка задачи выполненной из напоминания
+    if data.startswith("rem_done:"):
+        try:
+            task_id = int(data.split(":", maxsplit=1)[1])
+        except ValueError:
+            return
+
+        user_id = query.from_user.id
+        set_task_done(user_id=user_id, task_id=task_id)
+
+        await query.edit_message_text("Задача отмечена выполненной ✅")
+        return
+
+    # Показать варианты отсрочки
+    if data.startswith("rem_snooze_menu:"):
+        try:
+            task_id = int(data.split(":", maxsplit=1)[1])
+        except ValueError:
+            return
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "На 5 минут",
+                    callback_data=f"rem_snooze:{task_id}:5",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "На 10 минут",
+                    callback_data=f"rem_snooze:{task_id}:10",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "На 1 час",
+                    callback_data=f"rem_snooze:{task_id}:60",
+                )
+            ],
+        ]
+
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    # Отложить напоминание
+    if data.startswith("rem_snooze:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            return
+
+        try:
+            task_id = int(parts[1])
+            minutes = int(parts[2])
+        except ValueError:
+            return
+
+        user_id = query.from_user.id
+
+        row = get_task(user_id=user_id, task_id=task_id)
+        if not row:
+            await query.edit_message_text(
+                "Задача не найдена. Возможно, она была удалена."
+            )
+            return
+
+        _tid, task_text, _due_at = row
+
+        now = datetime.now(tz=LOCAL_TZ)
+        new_due = now + timedelta(minutes=minutes)
+        new_due_iso = new_due.isoformat()
+
+        # обновляем дедлайн в базе
+        update_task_due(user_id=user_id, task_id=task_id, due_at_iso=new_due_iso)
+
+        # ставим новое напоминание
+        if context.job_queue is not None:
+            delay = (new_due - now).total_seconds()
+            context.job_queue.run_once(
+                send_reminder,
+                when=delay,
+                chat_id=user_id,
+                data={"task_id": task_id, "task_text": task_text},
+            )
+
+        # красивый текст с указанием времени следующего напоминания
+        next_time_str = new_due.strftime("%H:%M")
+        await query.edit_message_text(
+            f"Напоминание отложено на {minutes} минут ⏰\n"
+            f"Следующее напоминание: {next_time_str}"
+        )
+        return
+
+
 
     # Удаление задачи
     if data.startswith("del:"):
@@ -412,12 +500,34 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     data = job.data or {}
     task_text = data.get("task_text", "задача")
+    task_id = data.get("task_id")
     chat_id = job.chat_id
+
+    # Если по какой-то причине id не передали — просто текстом
+    if task_id is None:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⏰ Напоминание:\n\n{task_text}",
+        )
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "Выполнено ✅", callback_data=f"rem_done:{task_id}"
+            ),
+            InlineKeyboardButton(
+                "Отложить ⏰", callback_data=f"rem_snooze_menu:{task_id}"
+            ),
+        ]
+    ]
 
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"⏰ Напоминание:\n\n{task_text}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
 
 
 
