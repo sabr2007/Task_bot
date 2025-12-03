@@ -204,30 +204,28 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     # Хранилище для найденного времени
     found_time: Optional[dtime] = None
     
-    # Текст, из которого мы будем вырезать найденные куски времени,
-    # чтобы они не мешали поиску даты
+    # Текст, из которого мы будем вырезать найденные куски времени
     clean_text_for_date = raw
 
-    # --- ШАГ 1: Ищем ВРЕМЯ регулярками (они точнее для коротких фраз "до 4") ---
+    # --- ШАГ 1: Ищем ВРЕМЯ регулярками ---
 
     # 1.1 Шаблон "до/к 4", "до/к 16:30"
+    # Группы: 1="до/к", 2="часы", 3="минуты"
     m_due = re.search(r"\b(до|к)\s+(\d{1,2})(?::(\d{2}))?\b", raw, flags=re.IGNORECASE)
     if m_due:
         hour = int(m_due.group(2))
         minute = int(m_due.group(3) or 0)
         
-        # Эвристика: если пишут "до 4", скорее всего имеют в виду 16:00, а не 4 утра
-        # (если только не указано явно "утра"). 
-        # Если число < 9, считаем это вечером (16, 17, 18...).
+        # Эвристика: "до 4" -> 16:00, если не уточнено иначе
         if 1 <= hour <= 8:
             hour += 12
             
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             found_time = dtime(hour, minute)
-            # Убираем "до 4" из текста, чтобы dateparser искал дату в остатке
             clean_text_for_date = raw.replace(m_due.group(0), " ")
 
     # 1.2 Если первый шаблон не сработал, пробуем "в 7 вечера", "в 18:00"
+    # Группы: 1="часы", 2="минуты", 3="утра/дня/..."
     if not found_time:
         m_at = re.search(
             r"\b(?:в|на)\s+(\d{1,2})(?::(\d{2}))?\s*(?:часа|часов|час|ч)?\s*(утра|дня|вечера|ночи)?\b",
@@ -236,7 +234,8 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
         if m_at:
             hour = int(m_at.group(1))
             minute = int(m_at.group(2) or 0)
-            mer = (m_at.group(4) or "").lower()
+            # ВОТ ТУТ БЫЛА ОШИБКА: берем группу 3, а не 4
+            mer = (m_at.group(3) or "").lower() 
 
             if mer in ("дня", "вечера") and 1 <= hour <= 11:
                 hour += 12
@@ -244,8 +243,6 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
                 hour = 0
             elif mer == "ночи" and hour == 12:
                 hour = 0
-            # Если нет уточнения (утра/вечера), но час маленький (1-6), 
-            # dateparser может путаться. Но пока оставим как есть (1:00 = 1 ночи).
             
             if 0 <= hour <= 23 and 0 <= minute <= 59:
                 found_time = dtime(hour, minute)
@@ -253,7 +250,6 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
 
     # --- ШАГ 2: Ищем ДАТУ через dateparser ---
     
-    # Предварительная нормализация (на случай "послезавтра")
     normalized_text = normalize_russian_time_phrases(clean_text_for_date)
     
     settings = {
@@ -270,52 +266,46 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     extracted_phrase = ""
 
     if matches:
-        # dateparser что-то нашел (например, "завтра")
+        # dateparser нашел дату (например, "завтра" или "суббота")
         found_phrase, parse_dt = matches[-1]
         
-        # Если dateparser нашел дату, но у нас есть СВОЕ найденное время (из регулярок),
-        # то подменяем время dateparser-а на наше.
         if found_time:
+            # Склеиваем дату от dateparser и время от regex
             final_dt = parse_dt.replace(hour=found_time.hour, minute=found_time.minute, second=0)
-            extracted_phrase = found_phrase # это кусок текста с датой
+            extracted_phrase = found_phrase
         else:
-            # Если регулярка не нашла время, доверяем dateparser полностью
+            # Только dateparser
             final_dt = parse_dt
             extracted_phrase = found_phrase
             
     else:
-        # dateparser не нашел дату (например, в тексте было только время "до 4" и всё)
+        # dateparser не нашел дату, но есть время от regex
         if found_time:
-            # Берем СЕГОДНЯ + найденное время
             candidate = now.replace(
                 hour=found_time.hour, minute=found_time.minute, second=0, microsecond=0
             )
-            # Если время уже прошло сегодня -> переносим на завтра
             if candidate <= now:
                 candidate += timedelta(days=1)
             final_dt = candidate
-            # Фразой считаем то, что нашла регулярка (но мы её уже вырезали выше, 
-            # поэтому просто берем raw минус clean_text, грубо говоря, 
-            # или просто оставляем текст задачи очищенным).
-            
+
     # Формируем чистый текст задачи
     if final_dt:
-        # Убираем из текста то, что нашли регулярки
+        # Удаляем куски времени/даты из текста
+        raw_clean = raw
         if found_time and m_due:
-            raw = raw.replace(m_due.group(0), "")
-        elif found_time and m_at: # m_at из scope выше может быть недоступен, если не аккуратно
-            # Чтобы не усложнять удаление, просто вернем clean_text_for_date,
-            # и вырежем еще и дату, найденную dateparser
-            raw = clean_text_for_date
-
+            raw_clean = raw_clean.replace(m_due.group(0), "")
+        elif found_time and m_at:
+            raw_clean = raw_clean.replace(m_at.group(0), "")
+        
         if extracted_phrase:
-            raw = raw.replace(extracted_phrase, "")
+            raw_clean = raw_clean.replace(extracted_phrase, "")
             
-        task_text = raw.strip(" ,.-") or "Задача"
+        task_text = raw_clean.strip(" ,.-") 
+        if not task_text: 
+            task_text = "Задача"
         return task_text, final_dt
 
     return raw, None
-
 
 # ==========================================
 # Обработчики команд и текста
