@@ -151,7 +151,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # Режим редактирования задачи: пользователь вводит новый текст
+    # --- Режим редактирования задачи ---
     edit_task_id = context.user_data.get("edit_task_id")
     if edit_task_id is not None:
         row = get_task(user_id, edit_task_id)
@@ -204,21 +204,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD,
         )
         return
+    # --- конец режима редактирования ---
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-
-    # --- режим редактирования задачи (как уже есть) ---
-    edit_task_id = context.user_data.get("edit_task_id")
-    if edit_task_id is not None:
-        ...
-        return
-
-    # ===== Новые пункты меню =====
+    # ===== Меню "Еще" / "Назад" / "Что бот умеет" =====
     if text == "Еще":
         await update.message.reply_text(
             "Дополнительные функции:",
@@ -236,8 +224,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Что бот умеет":
         await show_help(update, context)
         return
-    # =============================
-
+    # ==================================================
 
     if text == "Показать задачи":
         log_event(user_id, "tasks_shown")
@@ -259,7 +246,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_done_task(update, context)
         return
 
-
     # Игнор неизвестных команд
     if text.startswith("/"):
         await update.message.reply_text(
@@ -268,7 +254,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Парсим текст и дату
+    # --- Создание новой задачи ---
     task_text, due_dt = parse_task_and_due(text)
 
     now = datetime.now(tz=LOCAL_TZ)
@@ -277,7 +263,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     due_at_iso = due_dt.isoformat() if due_dt is not None else None
 
-    # Сохраняем
     task_id = add_task(user_id=user_id, text=task_text, due_at_iso=due_at_iso)
 
     log_event(
@@ -291,8 +276,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         },
     )
 
-
-    # Ставим напоминание, если есть дата
     if due_dt is not None and context.job_queue is not None:
         delta_seconds = (due_dt - now).total_seconds()
         context.job_queue.run_once(
@@ -302,7 +285,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data={"task_id": task_id, "task_text": task_text},
         )
 
-        # Предложение выбрать, за сколько времени напомнить
         keyboard = [
             [
                 InlineKeyboardButton("За 5 минут", callback_data=f"set_remind:{task_id}:5"),
@@ -320,7 +302,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Задача сохранена ✅\nВыберите, за сколько времени напомнить:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-
     else:
         await update.message.reply_text(
             "Не обнаружил дату или время.\n"
@@ -328,6 +309,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD,
             parse_mode="Markdown",
         )
+
 
 async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -381,7 +363,6 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=text,
             reply_markup=EXTRA_KEYBOARD,
         )
-
 
 async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список выполненных задач пользователя."""
