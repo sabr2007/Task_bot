@@ -30,7 +30,9 @@ from db import (
     get_users_with_tasks,
     get_task,
     update_task_due,
+    update_task_text,  
 )
+
 
 LOCAL_TZ = ZoneInfo(TIMEZONE)
 
@@ -133,6 +135,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
+    # Режим редактирования задачи: пользователь вводит новый текст
+    edit_task_id = context.user_data.get("edit_task_id")
+    if edit_task_id is not None:
+        row = get_task(user_id, edit_task_id)
+        if not row:
+            await update.message.reply_text(
+                "Задача не найдена.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            context.user_data.pop("edit_task_id", None)
+            return
+
+        _tid, old_text, old_due_iso = row
+
+        new_text, new_due_dt = parse_task_and_due(text)
+        if not new_text:
+            new_text = old_text
+
+        now = datetime.now(tz=LOCAL_TZ)
+
+        if new_due_dt is None:
+            # дедлайн не найден → оставляем старый
+            new_due_iso = old_due_iso
+        else:
+            if new_due_dt <= now:
+                # если указал прошлое время — просто убираем дедлайн
+                new_due_iso = None
+            else:
+                new_due_iso = new_due_dt.isoformat()
+
+        # обновляем текст и дедлайн
+        update_task_text(user_id, edit_task_id, new_text)
+        update_task_due(user_id, edit_task_id, new_due_iso)
+
+        context.user_data.pop("edit_task_id", None)
+
+        await update.message.reply_text(
+            "Задача обновлена ✏️",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+
     if text == "Показать задачи":
         await show_tasks(update, context)
         return
@@ -206,7 +251,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
-
 async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -222,7 +266,15 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = format_tasks_message("Твои задачи", tasks)
-    await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+
+    keyboard = [
+        [InlineKeyboardButton("✏️ Редактировать задачу", callback_data="edit_list")]
+    ]
+
+    await update.message.reply_text(
+        msg,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список выполненных задач пользователя."""
@@ -344,7 +396,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Задача отмечена выполненной ✅")
         return
 
-    # Показать варианты отсрочки
     # Показать варианты отсрочки
     if data.startswith("rem_snooze_menu:"):
         try:
@@ -515,6 +566,75 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Напоминание будет отправлено в {remind_time.strftime('%H:%M')} ⏰"
         )
         return
+
+    # Нажатие "Редактировать задачу" под списком задач
+    if data == "edit_list":
+        user_id = query.from_user.id
+        tasks = get_tasks(user_id)
+
+        if not tasks:
+            await query.edit_message_text("Нет задач для редактирования 🙂")
+            return
+
+        keyboard = []
+        for task_id, text, _ in tasks:
+            label = text if len(text) <= 25 else text[:22] + "..."
+            keyboard.append(
+                [InlineKeyboardButton(f"✏️ {label}", callback_data=f"edit:{task_id}")]
+            )
+
+        keyboard.append(
+            [InlineKeyboardButton("⬅️ Назад", callback_data="edit_back_to_tasks")]
+        )
+
+        await query.edit_message_text(
+            "Выбери задачу, которую хочешь отредактировать:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # Выбор конкретной задачи для редактирования
+    if data.startswith("edit:"):
+        try:
+            task_id = int(data.split(":", maxsplit=1)[1])
+        except ValueError:
+            return
+
+        # запоминаем, какую задачу редактируем
+        context.user_data["edit_task_id"] = task_id
+
+        await query.edit_message_text(
+            "✏️ Введите новый текст задачи.\n"
+            "❗ Не забудьте указать новый дедлайн, если он есть.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="edit_back_to_tasks")]]
+            ),
+        )
+        return
+
+    # Назад — вернуться к списку задач с кнопкой "Редактировать задачу"
+    if data == "edit_back_to_tasks":
+        user_id = query.from_user.id
+        context.user_data.pop("edit_task_id", None)
+
+        tasks = get_tasks(user_id)
+        if not tasks:
+            await query.edit_message_text(
+                "У тебя пока нет задач 🙂\nПросто напиши мне что-нибудь, и я сохраню это как задачу.",
+            )
+            return
+
+        msg = format_tasks_message("Твои задачи", tasks)
+        keyboard = [
+            [InlineKeyboardButton("✏️ Редактировать задачу", callback_data="edit_list")]
+        ]
+
+        await query.edit_message_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
 
     # Удаление задачи
     if data.startswith("del:"):

@@ -150,7 +150,6 @@ def get_archived_tasks(user_id: int) -> List[Tuple[int, str, Optional[str], Opti
     conn.close()
     return rows
 
-
 def delete_task(user_id: int, task_id: int):
     """Удаляет задачу по ID."""
     conn = sqlite3.connect(DB_PATH)
@@ -182,4 +181,20 @@ def set_task_done(user_id: int, task_id: int):
     conn.commit()
     conn.close()
 
+def update_task_text(user_id: int, task_id: int, new_text: str):
+    """Обновляет текст задачи."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE tasks
+        SET text = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        (new_text, task_id, user_id),
+    )
+
+    conn.commit()
+    conn.close()
 
