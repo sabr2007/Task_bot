@@ -139,22 +139,10 @@ def normalize_russian_time_phrases(raw: str) -> str:
     return re.sub(pattern, repl, text)
 
 def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
-    """
-    Парсит текст задачи и дату/время, если они есть.
-
-    Порядок:
-    1) Сначала пробуем свои русские шаблоны:
-       - "до 4", "до 16:30"
-       - "к 4", "к 16:30"
-       - "в 4", "в 4 часа", "в 4 дня/вечера/утра/ночи", "в 7 вечера" и т.п.
-    2) Если ничего не нашли — подключаем dateparser с небольшой нормализацией
-       фраз вида "12 часов дня", "7 часов вечера" и т.д.
-    """
     raw = text.strip()
     now = datetime.now(tz=LOCAL_TZ)
 
     def build_future_dt(hour: int, minute: int) -> datetime:
-        """Строим datetime на ближайшее будущее (сегодня или завтра)."""
         candidate = now.replace(hour=hour, minute=minute,
                                 second=0, microsecond=0)
         if candidate <= now:
@@ -172,6 +160,13 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     if m:
         hour = int(m.group(2))
         minute = int(m.group(3) or 0)
+
+        # 🔧 Эвристика: днём "до 4" обычно значит "до 16:00", а не до 4 утра.
+        # Срабатывает только:
+        # - если сейчас день (8:00–17:00)
+        # - и указан "маленький" час 1–7 без явного "утра/вечера".
+        if 1 <= hour <= 7 and 8 <= now.hour <= 17:
+            hour += 12  # 4 → 16, 5 → 17 и т.д.
 
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             dt = build_future_dt(hour, minute)
@@ -194,16 +189,15 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
         minute = int(m.group(2) or 0)
         mer = (m.group(3) or "").lower()
 
-        # Коррекция по "утро/день/вечер/ночь"
         if mer in ("дня", "вечера"):
             if 1 <= hour <= 11:
-                hour += 12  # 4 дня → 16, 7 вечера → 19
+                hour += 12
         elif mer == "утра":
             if hour == 12:
-                hour = 0   # 12 утра → 00:00
+                hour = 0
         elif mer == "ночи":
             if hour == 12:
-                hour = 0   # 12 ночи → 00:00
+                hour = 0
 
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             dt = build_future_dt(hour, minute)
@@ -226,23 +220,19 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     matches = search_dates(normalized, languages=["ru"], settings=settings)
 
     if matches:
-        # Берём последнее найденное совпадение
         phrase, dt = matches[-1]
 
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=LOCAL_TZ)
 
-        # Пытаемся выкинуть найденную фразу из исходного текста.
-        # Если phrase не найдено в raw (из-за нормализации) – replace просто ничего не изменит.
         task_text = raw.replace(phrase, "").strip(" ,.-")
         if not task_text:
             task_text = raw
 
         return task_text, dt
 
-    # ---------- 3. Ничего не нашли — возвращаем задачу без дедлайна ----------
-
     return raw, None
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_first_name = update.effective_user.first_name
