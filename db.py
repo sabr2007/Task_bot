@@ -1,8 +1,8 @@
 import sqlite3
+import json
 from typing import List, Tuple, Optional
 
 from config import DB_PATH
-
 
 def init_db():
     """Создаёт таблицу tasks и добавляет недостающие колонки."""
@@ -38,6 +38,21 @@ def init_db():
         cursor.execute("ALTER TABLE tasks ADD COLUMN status TEXT DEFAULT 'active'")
     if "completed_at" not in cols:
         cursor.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
+
+    # Логи действий пользователей
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            task_id INTEGER,
+            meta TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
 
     conn.commit()
     conn.close()
@@ -198,3 +213,25 @@ def update_task_text(user_id: int, task_id: int, new_text: str):
     conn.commit()
     conn.close()
 
+def log_event(
+    user_id: int,
+    event_type: str,
+    task_id: Optional[int] = None,
+    meta: Optional[dict] = None,
+) -> None:
+    """Пишет событие в таблицу events (для аналитики)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    meta_json = json.dumps(meta, ensure_ascii=False) if meta is not None else None
+
+    cursor.execute(
+        """
+        INSERT INTO events (user_id, event_type, task_id, meta)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user_id, event_type, task_id, meta_json),
+    )
+
+    conn.commit()
+    conn.close()

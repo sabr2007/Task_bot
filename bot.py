@@ -30,8 +30,10 @@ from db import (
     get_users_with_tasks,
     get_task,
     update_task_due,
-    update_task_text,  
+    update_task_text,
+    log_event,  
 )
+
 
 
 LOCAL_TZ = ZoneInfo(TIMEZONE)
@@ -39,10 +41,19 @@ LOCAL_TZ = ZoneInfo(TIMEZONE)
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["Показать задачи", "Удалить задачу"],
-        ["Отметить выполненной", "Архив задач"],
+        ["Отметить выполненной", "Еще"],
     ],
     resize_keyboard=True,
 )
+
+EXTRA_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["Что бот умеет", "Архив задач"],
+        ["Назад"],
+    ],
+    resize_keyboard=True,
+)
+
 
 def format_tasks_message(
     title: str,
@@ -115,15 +126,20 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_first_name = update.effective_user.first_name
+
+    # логируем запуск
+    log_event(
+        user_id=update.effective_user.id,
+        event_type="start",
+    )
+
     text = (
-        f"Привет, {user_first_name}!\n\n"
-        "Я твой быстрый бот для задач.\n\n"
-        "Просто напиши мне любую фразу, например:\n"
-        "→ «Подготовиться к экзамену завтра в 18:00»\n\n"
-        "Я сохраню задачу и поставлю напоминание.\n\n"
-        "Кнопки внизу:\n"
-        "• «Показать задачи» — увидеть список\n"
-        "• «Удалить задачу» — удалить через кнопки"
+        f"Здравствуйте, {user_first_name}!\n\n"
+        "Это ваш личный бот-органайзер задач. Сейчас он в режиме бета-тестирования.\n\n"
+        "Отправьте мне любую задачу текстом, например:\n"
+        "«Подготовиться к экзамену завтра в 18:00» — я сохраню её и помогу с напоминанием.\n\n"
+        "Основные кнопки внизу.\n"
+        "Чтобы посмотреть, что бот умеет, нажмите: «Еще» → «Что бот умеет»."
     )
     if update.message:
         await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
@@ -169,6 +185,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_task_text(user_id, edit_task_id, new_text)
         update_task_due(user_id, edit_task_id, new_due_iso)
 
+        log_event(
+            user_id=user_id,
+            event_type="task_edited",
+            task_id=edit_task_id,
+            meta={
+                "old_text": old_text,
+                "new_text": new_text,
+                "old_due_at": old_due_iso,
+                "new_due_at": new_due_iso,
+            },
+        )
+
         context.user_data.pop("edit_task_id", None)
 
         await update.message.reply_text(
@@ -177,22 +205,60 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    # --- режим редактирования задачи (как уже есть) ---
+    edit_task_id = context.user_data.get("edit_task_id")
+    if edit_task_id is not None:
+        ...
+        return
+
+    # ===== Новые пункты меню =====
+    if text == "Еще":
+        await update.message.reply_text(
+            "Дополнительные функции:",
+            reply_markup=EXTRA_KEYBOARD,
+        )
+        return
+
+    if text == "Назад":
+        await update.message.reply_text(
+            "Возвращаюсь к основному меню.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    if text == "Что бот умеет":
+        await show_help(update, context)
+        return
+    # =============================
+
 
     if text == "Показать задачи":
+        log_event(user_id, "tasks_shown")
         await show_tasks(update, context)
         return
 
     if text == "Удалить задачу":
+        log_event(user_id, "delete_menu_opened")
         await ask_delete_task(update, context)
         return
 
     if text == "Архив задач":
+        log_event(user_id, "archive_opened")
         await show_archive(update, context)
         return
 
     if text == "Отметить выполненной":
+        log_event(user_id, "mark_done_menu_opened")
         await ask_done_task(update, context)
         return
+
 
     # Игнор неизвестных команд
     if text.startswith("/"):
@@ -213,6 +279,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Сохраняем
     task_id = add_task(user_id=user_id, text=task_text, due_at_iso=due_at_iso)
+
+    log_event(
+        user_id=user_id,
+        event_type="task_created",
+        task_id=task_id,
+        meta={
+            "text": task_text,
+            "has_deadline": due_dt is not None,
+            "due_at": due_at_iso,
+        },
+    )
+
 
     # Ставим напоминание, если есть дата
     if due_dt is not None and context.job_queue is not None:
@@ -275,6 +353,35 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🧠 Что умеет этот бот:\n\n"
+        "• Сохранять задачи из обычного текста.\n"
+        "• Понимать даты и время на русском (например: «завтра в 18:00», "
+        "«в понедельник в 9 утра», «через 2 часа»).\n"
+        "• Ставить напоминания к дедлайнам (с выбором: за 5/10/60 минут "
+        "или в момент дедлайна).\n"
+        "• Показывать список активных задач с разделением: с дедлайном / без.\n"
+        "• Отмечать задачи выполненными и переносить их в архив.\n"
+        "• Показывать архив с датой выполнения.\n"
+        "• Откладывать напоминания (5 мин / 10 мин / 1 час).\n"
+        "• Редактировать текст задачи и её дедлайн.\n\n"
+        "Сейчас бот в бета-версии. Если что-то работает странно или у вас "
+        "появились идеи — просто напишите об этом в чат @sabrval😊"
+    )
+
+    if update.message:
+        # если вызвали из текстового режима
+        await update.message.reply_text(text, reply_markup=EXTRA_KEYBOARD)
+    else:
+        # если вдруг когда-нибудь будем дергать из callback'ов
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text=text,
+            reply_markup=EXTRA_KEYBOARD,
+        )
+
 
 async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список выполненных задач пользователя."""
@@ -393,8 +500,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         set_task_done(user_id=user_id, task_id=task_id)
 
+        set_task_done(user_id=user_id, task_id=task_id)
+
+        log_event(
+            user_id=user_id,
+            event_type="task_done_from_reminder",
+            task_id=task_id,
+        )
+
         await query.edit_message_text("Задача отмечена выполненной ✅")
         return
+
 
     # Показать варианты отсрочки
     if data.startswith("rem_snooze_menu:"):
@@ -402,6 +518,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task_id = int(data.split(":", maxsplit=1)[1])
         except ValueError:
             return
+
+        log_event(
+            user_id=query.from_user.id,
+            event_type="reminder_snooze_menu_opened",
+            task_id=task_id,
+        )
+
 
         keyboard = [
             [
@@ -475,6 +598,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=user_id,
                 data={"task_id": task_id, "task_text": task_text},
             )
+        
+        log_event(
+            user_id=user_id,
+            event_type="reminder_snoozed",
+            task_id=task_id,
+            meta={"minutes": minutes},
+        )
 
         # красивый текст с указанием времени следующего напоминания
         next_time_str = new_due.strftime("%H:%M")
@@ -527,6 +657,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("У задачи нет дедлайна — напоминание невозможно.")
             return
 
+        log_event(
+            user_id=query.from_user.id,
+            event_type="remind_option_chosen",
+            task_id=task_id,
+            meta={"mode": mode},
+        )
+
+
         due_dt = datetime.fromisoformat(due_iso).astimezone(LOCAL_TZ)
         now = datetime.now(tz=LOCAL_TZ)
 
@@ -570,11 +708,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Нажатие "Редактировать задачу" под списком задач
     if data == "edit_list":
         user_id = query.from_user.id
+        
+        log_event(
+            user_id=user_id,
+            event_type="edit_list_opened",
+        )
+
         tasks = get_tasks(user_id)
 
         if not tasks:
             await query.edit_message_text("Нет задач для редактирования 🙂")
             return
+
+
 
         keyboard = []
         for task_id, text, _ in tasks:
@@ -602,6 +748,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # запоминаем, какую задачу редактируем
         context.user_data["edit_task_id"] = task_id
+
+        log_event(
+            user_id=query.from_user.id,
+            event_type="task_edit_started",
+            task_id=task_id,
+        )
 
         await query.edit_message_text(
             "✏️ Введите новый текст задачи.\n"
@@ -646,6 +798,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         delete_task(user_id=user_id, task_id=task_id)
 
+    if data.startswith("del:"):
+        try:
+            task_id = int(data.split(":", maxsplit=1)[1])
+        except ValueError:
+            return
+
+        user_id = query.from_user.id
+        delete_task(user_id=user_id, task_id=task_id)
+
+
         tasks = get_tasks(user_id)
         if not tasks:
             text = "Задача удалена ✅\n\nСписок задач теперь пуст."
@@ -676,6 +838,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_id = query.from_user.id
         set_task_done(user_id=user_id, task_id=task_id)
+
+        log_event(
+            user_id=user_id,
+            event_type="task_marked_done",
+            task_id=task_id,
+        )
 
         tasks = get_tasks(user_id)
         if not tasks:
@@ -718,6 +886,16 @@ async def send_daily_digest(context: ContextTypes.DEFAULT_TYPE):
             tasks,
         )
 
+    for user_id in user_ids:
+        tasks = get_tasks(user_id)
+        if not tasks:
+            continue
+
+        msg = format_tasks_message(
+            "Утренний дайджест задач на сегодня",
+            tasks,
+        )
+
         await context.bot.send_message(
             chat_id=user_id,
             text=msg,
@@ -736,6 +914,11 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     # Если по какой-то причине id не передали — просто текстом
     if task_id is None:
+        log_event(
+            user_id=chat_id,
+            event_type="reminder_sent",
+            meta={"task_id": None, "text_only": True},
+        )
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"⏰ Напоминание:\n\n{task_text}",
@@ -752,6 +935,13 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
             ),
         ]
     ]
+
+    log_event(
+        user_id=chat_id,
+        event_type="reminder_sent",
+        task_id=task_id,
+        meta={"text_only": False},
+    )
 
     await context.bot.send_message(
         chat_id=chat_id,
