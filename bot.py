@@ -162,7 +162,10 @@ def format_tasks_message(title: str, tasks: List[Tuple[int, str, Optional[str]]]
 
 
 def normalize_russian_time_phrases(raw: str) -> str:
-    """Нормализует фразы времени для dateparser."""
+    """
+    Нормализует фразы вида 'в 2 часа дня' -> '14:00',
+    чтобы dateparser лучше их понимал, если регулярки не справятся.
+    """
     text = raw
     if "через" in text.lower():
         return text
@@ -182,80 +185,134 @@ def normalize_russian_time_phrases(raw: str) -> str:
             if 1 <= hour <= 11: hour += 12
         elif part_of_day == "ночи":
             if hour == 12: hour = 0
+            
         return f"{hour:02d}:00"
 
     return re.sub(pattern, repl, text)
 
 
 def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
+    """
+    Гибридный парсер:
+    1. Сначала ищет явное время (Regex).
+    2. Потом ищет дату (Dateparser).
+    3. Объединяет результаты.
+    """
     raw = text.strip()
-    raw_lower = raw.lower()
     now = datetime.now(tz=LOCAL_TZ)
 
-    # Список слов, при которых мы доверяем только dateparser
-    complex_time_markers = [
-        "завтра", "послезавтра", "через",
-        "понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресен"
-    ]
+    # Хранилище для найденного времени
+    found_time: Optional[dtime] = None
     
-    use_simple_regex = not any(marker in raw_lower for marker in complex_time_markers)
+    # Текст, из которого мы будем вырезать найденные куски времени,
+    # чтобы они не мешали поиску даты
+    clean_text_for_date = raw
 
-    def build_future_dt(hour: int, minute: int) -> datetime:
-        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        # Если время уже прошло сегодня, переносим на завтра
-        if candidate <= now:
-            candidate = candidate + timedelta(days=1)
-        return candidate
+    # --- ШАГ 1: Ищем ВРЕМЯ регулярками (они точнее для коротких фраз "до 4") ---
 
-    # 1. Кастомные шаблоны (работают только если нет сложных слов типа "завтра")
-    if use_simple_regex:
-        # 1.1 "до 4", "к 16:30"
-        m = re.search(r"\b(до|к)\s+(\d{1,2})(?::(\d{2}))?\b", raw, flags=re.IGNORECASE)
-        if m:
-            hour = int(m.group(2))
-            minute = int(m.group(3) or 0)
-            if 1 <= hour <= 7 and 8 <= now.hour <= 17:
-                hour += 12
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                dt = build_future_dt(hour, minute)
-                phrase = m.group(0)
-                task_text = raw.replace(phrase, "").strip(" ,.-") or raw
-                return task_text, dt
+    # 1.1 Шаблон "до/к 4", "до/к 16:30"
+    m_due = re.search(r"\b(до|к)\s+(\d{1,2})(?::(\d{2}))?\b", raw, flags=re.IGNORECASE)
+    if m_due:
+        hour = int(m_due.group(2))
+        minute = int(m_due.group(3) or 0)
+        
+        # Эвристика: если пишут "до 4", скорее всего имеют в виду 16:00, а не 4 утра
+        # (если только не указано явно "утра"). 
+        # Если число < 9, считаем это вечером (16, 17, 18...).
+        if 1 <= hour <= 8:
+            hour += 12
+            
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            found_time = dtime(hour, minute)
+            # Убираем "до 4" из текста, чтобы dateparser искал дату в остатке
+            clean_text_for_date = raw.replace(m_due.group(0), " ")
 
-        # 1.2 "в 7 вечера", "в 12 часов"
-        m = re.search(
-            r"\bв\s+(\d{1,2})(?::(\d{2}))?\s*(?:часа|часов|час|ч)?\s*(утра|дня|вечера|ночи)?\b",
+    # 1.2 Если первый шаблон не сработал, пробуем "в 7 вечера", "в 18:00"
+    if not found_time:
+        m_at = re.search(
+            r"\b(?:в|на)\s+(\d{1,2})(?::(\d{2}))?\s*(?:часа|часов|час|ч)?\s*(утра|дня|вечера|ночи)?\b",
             raw, flags=re.IGNORECASE
         )
-        if m:
-            hour = int(m.group(1))
-            minute = int(m.group(2) or 0)
-            mer = (m.group(3) or "").lower()
-            if mer in ("дня", "вечера") and 1 <= hour <= 11: hour += 12
-            elif mer == "утра" and hour == 12: hour = 0
-            elif mer == "ночи" and hour == 12: hour = 0
+        if m_at:
+            hour = int(m_at.group(1))
+            minute = int(m_at.group(2) or 0)
+            mer = (m_at.group(4) or "").lower()
 
+            if mer in ("дня", "вечера") and 1 <= hour <= 11:
+                hour += 12
+            elif mer == "утра" and hour == 12:
+                hour = 0
+            elif mer == "ночи" and hour == 12:
+                hour = 0
+            # Если нет уточнения (утра/вечера), но час маленький (1-6), 
+            # dateparser может путаться. Но пока оставим как есть (1:00 = 1 ночи).
+            
             if 0 <= hour <= 23 and 0 <= minute <= 59:
-                dt = build_future_dt(hour, minute)
-                phrase = m.group(0)
-                task_text = raw.replace(phrase, "").strip(" ,.-") or raw
-                return task_text, dt
+                found_time = dtime(hour, minute)
+                clean_text_for_date = raw.replace(m_at.group(0), " ")
 
-    # 2. Dateparser (Fallback или если есть сложные слова)
-    normalized = normalize_russian_time_phrases(raw)
+    # --- ШАГ 2: Ищем ДАТУ через dateparser ---
+    
+    # Предварительная нормализация (на случай "послезавтра")
+    normalized_text = normalize_russian_time_phrases(clean_text_for_date)
+    
     settings = {
         "TIMEZONE": TIMEZONE,
         "RETURN_AS_TIMEZONE_AWARE": True,
         "PREFER_DATES_FROM": "future",
     }
-    matches = search_dates(normalized, languages=["ru"], settings=settings)
+    
+    matches = search_dates(normalized_text, languages=["ru"], settings=settings)
+    
+    # --- ШАГ 3: Сборка результата ---
+
+    final_dt: Optional[datetime] = None
+    extracted_phrase = ""
 
     if matches:
-        phrase, dt = matches[-1]
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=LOCAL_TZ)
-        task_text = raw.replace(phrase, "").strip(" ,.-") or raw
-        return task_text, dt
+        # dateparser что-то нашел (например, "завтра")
+        found_phrase, parse_dt = matches[-1]
+        
+        # Если dateparser нашел дату, но у нас есть СВОЕ найденное время (из регулярок),
+        # то подменяем время dateparser-а на наше.
+        if found_time:
+            final_dt = parse_dt.replace(hour=found_time.hour, minute=found_time.minute, second=0)
+            extracted_phrase = found_phrase # это кусок текста с датой
+        else:
+            # Если регулярка не нашла время, доверяем dateparser полностью
+            final_dt = parse_dt
+            extracted_phrase = found_phrase
+            
+    else:
+        # dateparser не нашел дату (например, в тексте было только время "до 4" и всё)
+        if found_time:
+            # Берем СЕГОДНЯ + найденное время
+            candidate = now.replace(
+                hour=found_time.hour, minute=found_time.minute, second=0, microsecond=0
+            )
+            # Если время уже прошло сегодня -> переносим на завтра
+            if candidate <= now:
+                candidate += timedelta(days=1)
+            final_dt = candidate
+            # Фразой считаем то, что нашла регулярка (но мы её уже вырезали выше, 
+            # поэтому просто берем raw минус clean_text, грубо говоря, 
+            # или просто оставляем текст задачи очищенным).
+            
+    # Формируем чистый текст задачи
+    if final_dt:
+        # Убираем из текста то, что нашли регулярки
+        if found_time and m_due:
+            raw = raw.replace(m_due.group(0), "")
+        elif found_time and m_at: # m_at из scope выше может быть недоступен, если не аккуратно
+            # Чтобы не усложнять удаление, просто вернем clean_text_for_date,
+            # и вырежем еще и дату, найденную dateparser
+            raw = clean_text_for_date
+
+        if extracted_phrase:
+            raw = raw.replace(extracted_phrase, "")
+            
+        task_text = raw.strip(" ,.-") or "Задача"
+        return task_text, final_dt
 
     return raw, None
 
@@ -501,7 +558,7 @@ async def ask_done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================================
-# Callback Handlers (Refactored)
+# Callback Handlers 
 # ==========================================
 
 async def on_reminder_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
