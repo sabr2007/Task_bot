@@ -188,51 +188,60 @@ def normalize_russian_time_phrases(raw: str) -> str:
 
 
 def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
-    """Парсит текст задачи и пытается извлечь дату/время."""
     raw = text.strip()
+    raw_lower = raw.lower()
     now = datetime.now(tz=LOCAL_TZ)
+
+    # Список слов, при которых мы доверяем только dateparser
+    complex_time_markers = [
+        "завтра", "послезавтра", "через",
+        "понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресен"
+    ]
+    
+    use_simple_regex = not any(marker in raw_lower for marker in complex_time_markers)
 
     def build_future_dt(hour: int, minute: int) -> datetime:
         candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        # Если время уже прошло сегодня, переносим на завтра
         if candidate <= now:
             candidate = candidate + timedelta(days=1)
         return candidate
 
-    # 1. Кастомные шаблоны
-    # "до/к 16:30"
-    m = re.search(r"\b(до|к)\s+(\d{1,2})(?::(\d{2}))?\b", raw, flags=re.IGNORECASE)
-    if m:
-        hour = int(m.group(2))
-        minute = int(m.group(3) or 0)
-        # Эвристика: 4 -> 16
-        if 1 <= hour <= 7 and 8 <= now.hour <= 17:
-            hour += 12
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            dt = build_future_dt(hour, minute)
-            phrase = m.group(0)
-            task_text = raw.replace(phrase, "").strip(" ,.-") or raw
-            return task_text, dt
+    # 1. Кастомные шаблоны (работают только если нет сложных слов типа "завтра")
+    if use_simple_regex:
+        # 1.1 "до 4", "к 16:30"
+        m = re.search(r"\b(до|к)\s+(\d{1,2})(?::(\d{2}))?\b", raw, flags=re.IGNORECASE)
+        if m:
+            hour = int(m.group(2))
+            minute = int(m.group(3) or 0)
+            if 1 <= hour <= 7 and 8 <= now.hour <= 17:
+                hour += 12
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                dt = build_future_dt(hour, minute)
+                phrase = m.group(0)
+                task_text = raw.replace(phrase, "").strip(" ,.-") or raw
+                return task_text, dt
 
-    # "в 7 вечера"
-    m = re.search(
-        r"\bв\s+(\d{1,2})(?::(\d{2}))?\s*(?:часа|часов|час|ч)?\s*(утра|дня|вечера|ночи)?\b",
-        raw, flags=re.IGNORECASE
-    )
-    if m:
-        hour = int(m.group(1))
-        minute = int(m.group(2) or 0)
-        mer = (m.group(3) or "").lower()
-        if mer in ("дня", "вечера") and 1 <= hour <= 11: hour += 12
-        elif mer == "утра" and hour == 12: hour = 0
-        elif mer == "ночи" and hour == 12: hour = 0
+        # 1.2 "в 7 вечера", "в 12 часов"
+        m = re.search(
+            r"\bв\s+(\d{1,2})(?::(\d{2}))?\s*(?:часа|часов|час|ч)?\s*(утра|дня|вечера|ночи)?\b",
+            raw, flags=re.IGNORECASE
+        )
+        if m:
+            hour = int(m.group(1))
+            minute = int(m.group(2) or 0)
+            mer = (m.group(3) or "").lower()
+            if mer in ("дня", "вечера") and 1 <= hour <= 11: hour += 12
+            elif mer == "утра" and hour == 12: hour = 0
+            elif mer == "ночи" and hour == 12: hour = 0
 
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            dt = build_future_dt(hour, minute)
-            phrase = m.group(0)
-            task_text = raw.replace(phrase, "").strip(" ,.-") or raw
-            return task_text, dt
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                dt = build_future_dt(hour, minute)
+                phrase = m.group(0)
+                task_text = raw.replace(phrase, "").strip(" ,.-") or raw
+                return task_text, dt
 
-    # 2. Dateparser
+    # 2. Dateparser (Fallback или если есть сложные слова)
     normalized = normalize_russian_time_phrases(raw)
     settings = {
         "TIMEZONE": TIMEZONE,
