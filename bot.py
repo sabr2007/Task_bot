@@ -200,9 +200,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         await update.message.reply_text(
-            "Задача сохранена ✅",
+            "Не обнаружил дату или время.\n"
+            "Записал задачу как *без дедлайна* ✅",
             reply_markup=MAIN_KEYBOARD,
+            parse_mode="Markdown",
         )
+
 
 async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -256,7 +259,6 @@ async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = "Архив выполненных задач:\n\n" + "\n".join(lines)
     await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
-
 
 async def ask_delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
