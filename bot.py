@@ -7,7 +7,9 @@ from telegram import (
     ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InputFile,
 )
+
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -17,9 +19,10 @@ from telegram.ext import (
     filters,
 )
 
+
 from dateparser.search import search_dates
 
-from config import TELEGRAM_BOT_TOKEN, TIMEZONE
+from config import TELEGRAM_BOT_TOKEN, TIMEZONE, DB_PATH
 from db import (
     init_db,
     add_task,
@@ -37,7 +40,7 @@ from db import (
 
 
 LOCAL_TZ = ZoneInfo(TIMEZONE)
-
+ADMIN_USER_ID = 6113692933
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["Показать задачи", "Удалить задачу"],
@@ -309,7 +312,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD,
             parse_mode="Markdown",
         )
-
 
 async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -930,12 +932,33 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+async def dump_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручная выгрузка файла базы данных в личку админа."""
+    if not update.message:
+        return
+
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("Недостаточно прав для этой команды.")
+        return
+
+    try:
+        with open(DB_PATH, "rb") as f:
+            await context.bot.send_document(
+                chat_id=ADMIN_USER_ID,
+                document=InputFile(f, filename="tasks.db"),
+                caption="Снимок базы задач (ручная выгрузка)",
+            )
+    except FileNotFoundError:
+        await update.message.reply_text("Файл базы не найден на сервере.")
+
 def main():
     init_db()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("dumpdb", dump_db))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
