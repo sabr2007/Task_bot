@@ -32,8 +32,6 @@ from db import (
     update_task_due,
 )
 
-
-
 LOCAL_TZ = ZoneInfo(TIMEZONE)
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -80,7 +78,6 @@ def format_tasks_message(
 
     return "\n".join(parts).strip()
 
-
 def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     """
     Парсит текст задачи и дату/время, если они есть.
@@ -114,7 +111,6 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
 
     return task_text, dt
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_first_name = update.effective_user.first_name
     text = (
@@ -130,7 +126,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -138,7 +133,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    
     if text == "Показать задачи":
         await show_tasks(update, context)
         return
@@ -154,7 +148,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Отметить выполненной":
         await ask_done_task(update, context)
         return
-
 
     # Игнор неизвестных команд
     if text.startswith("/"):
@@ -175,7 +168,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Сохраняем
     task_id = add_task(user_id=user_id, text=task_text, due_at_iso=due_at_iso)
-
 
     # Ставим напоминание, если есть дата
     if due_dt is not None and context.job_queue is not None:
@@ -212,7 +204,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD,
         )
 
-
 async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -229,7 +220,6 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = format_tasks_message("Твои задачи", tasks)
     await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
-
 
 async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список выполненных задач пользователя."""
@@ -248,8 +238,6 @@ async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = format_tasks_message("Архив выполненных задач", tasks)
     await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
-
-
 
 async def ask_delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -314,7 +302,6 @@ async def ask_done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
     )
 
-
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -336,6 +323,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Задача отмечена выполненной ✅")
         return
 
+    # Показать варианты отсрочки
     # Показать варианты отсрочки
     if data.startswith("rem_snooze_menu:"):
         try:
@@ -362,12 +350,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     callback_data=f"rem_snooze:{task_id}:60",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    "↩️ Назад",
+                    callback_data=f"rem_back:{task_id}",
+                )
+            ],
         ]
 
         await query.edit_message_reply_markup(
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
+
 
     # Отложить напоминание
     if data.startswith("rem_snooze:"):
@@ -416,6 +411,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Следующее напоминание: {next_time_str}"
         )
         return
+
+    # Вернуться к исходным кнопкам "Выполнено / Отложить"
+    if data.startswith("rem_back:"):
+        try:
+            task_id = int(data.split(":", maxsplit=1)[1])
+        except ValueError:
+            return
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Выполнено ✅", callback_data=f"rem_done:{task_id}"
+                ),
+                InlineKeyboardButton(
+                    "Отложить ⏰", callback_data=f"rem_snooze_menu:{task_id}"
+                ),
+            ]
+        ]
+
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
 
     # Установка времени напоминания
     if data.startswith("set_remind:"):
@@ -564,7 +583,6 @@ async def send_daily_digest(context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KEYBOARD,
         )
 
-
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     if not job:
@@ -600,9 +618,6 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-
-
-
 def main():
     init_db()
 
@@ -623,7 +638,6 @@ def main():
 
     print("Бот запущен. Нажми Ctrl+C, чтобы остановить.")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()

@@ -32,12 +32,10 @@ def init_db():
 
     if "due_at" not in cols:
         cursor.execute("ALTER TABLE tasks ADD COLUMN due_at TEXT")
-
     if "notified" not in cols:
         cursor.execute("ALTER TABLE tasks ADD COLUMN notified INTEGER DEFAULT 0")
     if "status" not in cols:
         cursor.execute("ALTER TABLE tasks ADD COLUMN status TEXT DEFAULT 'active'")
-
     if "completed_at" not in cols:
         cursor.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
 
@@ -60,7 +58,6 @@ def add_task(user_id: int, text: str, due_at_iso: Optional[str] = None) -> int:
     conn.commit()
     conn.close()
     return task_id
-
 
 def get_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
     """Возвращает список активных задач пользователя: (id, text, due_at_iso)."""
@@ -99,7 +96,6 @@ def get_task(user_id: int, task_id: int) -> Optional[Tuple[int, str, Optional[st
     conn.close()
     return row
 
-
 def update_task_due(user_id: int, task_id: int, due_at_iso: Optional[str]):
     """Обновляет дедлайн задачи."""
     conn = sqlite3.connect(DB_PATH)
@@ -117,7 +113,6 @@ def update_task_due(user_id: int, task_id: int, due_at_iso: Optional[str]):
     conn.commit()
     conn.close()
 
-
 def get_users_with_tasks() -> List[int]:
     """Возвращает id пользователей, у которых есть активные задачи."""
     conn = sqlite3.connect(DB_PATH)
@@ -134,7 +129,6 @@ def get_users_with_tasks() -> List[int]:
     rows = cursor.fetchall()
     conn.close()
     return [row[0] for row in rows]
-
 
 def get_archived_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
     """Возвращает список выполненных задач пользователя."""
@@ -154,7 +148,6 @@ def get_archived_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
     rows = cursor.fetchall()
     conn.close()
     return rows
-
 
 def delete_task(user_id: int, task_id: int):
     """Удаляет задачу по ID."""
