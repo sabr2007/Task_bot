@@ -1,7 +1,7 @@
 from typing import List, Tuple, Optional
 from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
-
+import re
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -94,16 +94,67 @@ def format_tasks_message(
 
     return "\n".join(parts).strip()
 
+def normalize_russian_time_phrases(raw: str) -> str:
+    """
+    Заменяет фразы вида '12 часов дня / 7 часов вечера / 9 часов утра / 12 часов ночи'
+    на формат 'HH:00', чтобы dateparser меньше путался.
+
+    Ничего не делает, если есть слово 'через' (там, как правило, относительное время:
+    'через 3 часа', 'через 12 часов' и т.п.).
+    """
+    text = raw
+
+    # Если явно 'через 12 часов' — оставляем как есть, это относительное время
+    if "через" in text.lower():
+        return text
+
+    pattern = re.compile(
+        r"\b(\d{1,2})\s*час(?:а|ов)?\s*(утра|дня|вечера|ночи)\b",
+        re.IGNORECASE,
+    )
+
+    def repl(match: re.Match) -> str:
+        hour = int(match.group(1))
+        part_of_day = match.group(2).lower()
+
+        # Базовая логика перевода в 24-часовой формат
+        if part_of_day == "утра":
+            # 12 утра → 00:00
+            if hour == 12:
+                hour = 0
+
+        elif part_of_day in ("дня", "вечера"):
+            # 1–11 дня/вечера → +12 часов (13–23)
+            if hour < 12:
+                hour += 12
+            # 12 дня/вечера оставляем как 12:00 / 00:00? — логичнее оставить 12:00
+            # (чаще всего это "полдень", а не полночь)
+
+        elif part_of_day == "ночи":
+            # 12 ночи → 00:00, 1–5 ночи оставляем как есть
+            if hour == 12:
+                hour = 0
+
+        return f"{hour:02d}:00"
+
+    return re.sub(pattern, repl, text)
+
 def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     """
     Парсит текст задачи и дату/время, если они есть.
 
-    Пример:
-    "подготовиться к экзамену завтра в 18:00" ->
-        ("подготовиться к экзамену", datetime)
+    Логика:
+    1) Сначала пробуем обычный dateparser (он понимает сложные штуки типа
+       "завтра в 18:00", "в следующий понедельник в 9 утра").
+    2) Если он НИЧЕГО не нашёл, подключаем свои простые русские шаблоны:
+       - "до 4", "до 16:30"
+       - "к 4", "к 16:30"
+       - "в 4", "в 4 часа", "в 4 дня/вечера/утра"
+       - "в 7 вечера" → 19:00 и т.п.
     """
     raw = text.strip()
 
+    # ---------- 1. Сначала пробуем dateparser ----------
     settings = {
         "TIMEZONE": TIMEZONE,
         "RETURN_AS_TIMEZONE_AWARE": True,
@@ -112,20 +163,85 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
 
     matches = search_dates(raw, languages=["ru"], settings=settings)
 
-    if not matches:
-        return raw, None
+    if matches:
+        # Берём последнее найденное совпадение
+        phrase, dt = matches[-1]
 
-    phrase, dt = matches[-1]
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=LOCAL_TZ)
 
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=LOCAL_TZ)
+        task_text = raw.replace(phrase, "").strip(" ,.-")
+        if not task_text:
+            task_text = raw
 
-    task_text = raw.replace(phrase, "").strip(" ,.-")
+        return task_text, dt
 
-    if not task_text:
-        task_text = raw
+    # ---------- 2. Наши кастомные шаблоны ----------
 
-    return task_text, dt
+    now = datetime.now(tz=LOCAL_TZ)
+
+    def build_future_dt(hour: int, minute: int) -> datetime:
+        """Строим datetime на ближайшее будущее (сегодня или завтра)."""
+        candidate = now.replace(hour=hour, minute=minute,
+                                second=0, microsecond=0)
+        if candidate <= now:
+            candidate = candidate + timedelta(days=1)
+        return candidate
+
+    # 2.1 "до 4", "до 16:30", "к 4", "к 16:30"
+    m = re.search(
+        r"\b(до|к)\s+(\d{1,2})(?::(\d{2}))?\b",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        hour = int(m.group(2))
+        minute = int(m.group(3) or 0)
+
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            dt = build_future_dt(hour, minute)
+            phrase = m.group(0)
+            task_text = raw.replace(phrase, "").strip(" ,.-")
+            if not task_text:
+                task_text = raw
+            return task_text, dt
+
+    # 2.2 "в 4", "в 4 часа", "в 4 дня/вечера/утра", "в 7 вечера"
+    m = re.search(
+        r"\bв\s+(\d{1,2})(?::(\d{2}))?\s*"
+        r"(?:часа|часов|час|ч)?\s*"
+        r"(утра|дня|вечера|ночи)?\b",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        mer = (m.group(3) or "").lower()
+
+        # Небольшая корректировка по "утрам/дням/вечерам"
+        if mer in ("дня", "вечера"):
+            if 1 <= hour <= 11:
+                hour += 12  # 4 дня → 16, 7 вечера → 19
+        elif mer == "утра":
+            # 1–11 утра оставляем как есть, 12 утра → 0
+            if hour == 12:
+                hour = 0
+        elif mer == "ночи":
+            # Ночь: 1–5 → как есть, 12 ночи → 0
+            if hour == 12:
+                hour = 0
+
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            dt = build_future_dt(hour, minute)
+            phrase = m.group(0)
+            task_text = raw.replace(phrase, "").strip(" ,.-")
+            if not task_text:
+                task_text = raw
+            return task_text, dt
+
+    # ---------- 3. Ничего не нашли — просто возвращаем текст как задачу без дедлайна ----------
+    return raw, None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_first_name = update.effective_user.first_name
@@ -952,6 +1068,71 @@ async def dump_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except FileNotFoundError:
         await update.message.reply_text("Файл базы не найден на сервере.")
 
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Рассылка сообщения всем пользователям с активными задачами."""
+    if not update.message:
+        return
+
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору.")
+        return
+
+    # Текст рассылки:
+    # 1) либо /broadcast текст...
+    # 2) либо /broadcast как ответ на сообщение, которое надо разослать
+    args_text = " ".join(context.args) if context.args else ""
+    reply_msg = update.message.reply_to_message
+
+    if args_text:
+        broadcast_text = args_text
+    elif reply_msg and reply_msg.text:
+        broadcast_text = reply_msg.text
+    else:
+        await update.message.reply_text(
+            "Напиши текст после команды:\n"
+            "/broadcast Ваш текст здесь\n\n"
+            "Или используй /broadcast как ответ на сообщение, "
+            "которое нужно разослать."
+        )
+        return
+
+    # Кому шлём — всем пользователям с активными задачами
+    recipients = get_users_with_tasks()
+    if not recipients:
+        await update.message.reply_text("Нет пользователей с активными задачами для рассылки.")
+        return
+
+    sent = 0
+    failed = 0
+
+    for uid in recipients:
+        try:
+            await context.bot.send_message(chat_id=uid, text=broadcast_text)
+            sent += 1
+        except Exception:
+            # Пользователь мог заблокировать бота и т.п.
+            failed += 1
+            continue
+
+    # залогируем сам факт рассылки
+    log_event(
+        user_id=user_id,
+        event_type="broadcast_sent",
+        meta={
+            "text": broadcast_text,
+            "recipients_count": len(recipients),
+            "sent": sent,
+            "failed": failed,
+        },
+    )
+
+    await update.message.reply_text(
+        f"Рассылка завершена.\n"
+        f"Успешно отправлено: {sent}\n"
+        f"Не доставлено: {failed}"
+    )
+
 def main():
     init_db()
 
@@ -959,6 +1140,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("dumpdb", dump_db))
+    app.add_handler(CommandHandler("broadcast", broadcast))  # ← вот это добавить
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
