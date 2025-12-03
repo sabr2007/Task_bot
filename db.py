@@ -213,6 +213,7 @@ def update_task_text(user_id: int, task_id: int, new_text: str):
     conn.commit()
     conn.close()
 
+
 def log_event(
     user_id: int,
     event_type: str,

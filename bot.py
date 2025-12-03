@@ -307,6 +307,7 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
 
     return raw, None
 
+
 # ==========================================
 # Обработчики команд и текста
 # ==========================================
