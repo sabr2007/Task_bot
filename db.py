@@ -130,14 +130,15 @@ def get_users_with_tasks() -> List[int]:
     conn.close()
     return [row[0] for row in rows]
 
-def get_archived_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
-    """Возвращает список выполненных задач пользователя."""
+def get_archived_tasks(user_id: int) -> List[Tuple[int, str, Optional[str], Optional[str]]]:
+    """Возвращает список выполненных задач пользователя: (id, text, due_at, completed_at)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute(
         """
-        SELECT id, text, due_at FROM tasks
+        SELECT id, text, due_at, completed_at
+        FROM tasks
         WHERE user_id = ?
           AND status = 'done'
         ORDER BY completed_at DESC, id DESC
@@ -148,6 +149,7 @@ def get_archived_tasks(user_id: int) -> List[Tuple[int, str, Optional[str]]]:
     rows = cursor.fetchall()
     conn.close()
     return rows
+
 
 def delete_task(user_id: int, task_id: int):
     """Удаляет задачу по ID."""

@@ -227,7 +227,8 @@ async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id
-    tasks: List[Tuple[int, str, Optional[str]]] = get_archived_tasks(user_id)
+    # id, text, due_at_iso, completed_at_iso
+    tasks: List[Tuple[int, str, Optional[str], Optional[str]]] = get_archived_tasks(user_id)
 
     if not tasks:
         await update.message.reply_text(
@@ -236,8 +237,26 @@ async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    msg = format_tasks_message("Архив выполненных задач", tasks)
+    lines: List[str] = []
+    for idx, (task_id, text, _due_at_iso, completed_at_iso) in enumerate(tasks, start=1):
+        parts: List[str] = [f"{idx}. ✅ {text}"]
+
+        # время выполнения
+        if completed_at_iso:
+            try:
+                completed_dt = datetime.fromisoformat(completed_at_iso).astimezone(LOCAL_TZ)
+                completed_str = completed_dt.strftime("%d.%m %H:%M")
+                parts.append(f"выполнено {completed_str}")
+            except Exception:
+                pass
+
+        # склеиваем дли одной строки
+        line = " — ".join(parts)
+        lines.append(line)
+
+    msg = "Архив выполненных задач:\n\n" + "\n".join(lines)
     await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+
 
 async def ask_delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
