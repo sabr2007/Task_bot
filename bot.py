@@ -612,7 +612,9 @@ async def on_reminder_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE)
         task_id, minutes = int(parts[1]), int(parts[2])
     except ValueError:
         return
-
+    
+    remove_job_if_exists(str(task_id), context)
+    
     user_id = query.from_user.id
     row = get_task(user_id, task_id)
     if not row:
@@ -668,6 +670,8 @@ async def on_set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_id = int(task_id_str)
     except ValueError: return
 
+    remove_job_if_exists(str(task_id), context)
+    
     user_id = query.from_user.id
     row = get_task(user_id, task_id)
     if not row:
@@ -789,7 +793,7 @@ async def on_done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError: return
 
     remove_job_if_exists(str(task_id), context)
-    
+
     user_id = query.from_user.id
     set_task_done(user_id, task_id)
     log_event(user_id, "task_marked_done", task_id)
