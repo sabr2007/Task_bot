@@ -106,6 +106,7 @@ async def restore_reminders_on_startup(app):
                         when=delta,
                         chat_id=user_id,
                         data={"task_id": task_id, "task_text": text},
+                        name=str(task_id)  # <--- ВАЖНО: даем имя таймеру
                     )
                     restored_count += 1
             except Exception as e:
@@ -115,6 +116,20 @@ async def restore_reminders_on_startup(app):
 
     except Exception as e:
         logger.error(f"Критическая ошибка при восстановлении напоминаний: {e}")
+
+
+def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Удаляет задачу из JobQueue по имени (ID задачи)."""
+    if not context.job_queue:
+        return False
+    
+    current_jobs = context.job_queue.get_jobs_by_name(name)
+    if not current_jobs:
+        return False
+    
+    for job in current_jobs:
+        job.schedule_removal()
+    return True
 
 
 def format_tasks_message(title: str, tasks: List[Tuple[int, str, Optional[str]]]) -> str:
@@ -425,6 +440,7 @@ async def create_new_task(update, context, user_id, text):
             when=delta_seconds,
             chat_id=user_id,
             data={"task_id": task_id, "task_text": task_text},
+            name=str(task_id)  # <--- ВАЖНО: даем имя таймеру
         )
 
         keyboard = [
@@ -617,6 +633,7 @@ async def on_reminder_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE)
             when=delay,
             chat_id=user_id,
             data={"task_id": task_id, "task_text": task_text},
+            name=str(task_id)  # <--- ВАЖНО: даем имя таймеру
         )
     
     log_event(user_id, "reminder_snoozed", task_id, meta={"minutes": minutes})
@@ -682,6 +699,7 @@ async def on_set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             when=delay,
             chat_id=user_id,
             data={"task_id": task_id, "task_text": task_text},
+            name=str(task_id)  # <--- ВАЖНО: даем имя таймеру
         )
 
     log_event(user_id, "remind_option_chosen", task_id, meta={"mode": mode})
@@ -748,6 +766,8 @@ async def on_delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_id = int(query.data.split(":")[1])
     except ValueError: return
 
+    remove_job_if_exists(str(task_id), context)
+
     user_id = query.from_user.id
     delete_task(user_id, task_id)
 
@@ -768,6 +788,8 @@ async def on_done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_id = int(query.data.split(":")[1])
     except ValueError: return
 
+    remove_job_if_exists(str(task_id), context)
+    
     user_id = query.from_user.id
     set_task_done(user_id, task_id)
     log_event(user_id, "task_marked_done", task_id)
