@@ -106,7 +106,7 @@ async def restore_reminders_on_startup(app):
                         when=delta,
                         chat_id=user_id,
                         data={"task_id": task_id, "task_text": text},
-                        name=str(task_id)  # <--- ВАЖНО: даем имя таймеру
+                        name=str(task_id)
                     )
                     restored_count += 1
             except Exception as e:
@@ -169,7 +169,6 @@ def format_tasks_message(title: str, tasks: List[Tuple[int, str, Optional[str]]]
         parts.append("🕒 Задачи с дедлайном:\n" + "\n".join(lines) + "\n")
 
     if without_deadline:
-        # Нумерацию продолжаем или начинаем заново? Обычно лучше заново для блока
         lines = [f"{i}. {t}" for i, t in enumerate(without_deadline, start=1)]
         parts.append("📝 Без дедлайна:\n" + "\n".join(lines))
 
@@ -225,7 +224,6 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     # --- ШАГ 1: Ищем ВРЕМЯ регулярками ---
 
     # 1.1 Шаблон "до/к 4", "до/к 16:30"
-    # Группы: 1="до/к", 2="часы", 3="минуты"
     m_due = re.search(r"\b(до|к)\s+(\d{1,2})(?::(\d{2}))?\b", raw, flags=re.IGNORECASE)
     if m_due:
         hour = int(m_due.group(2))
@@ -240,7 +238,6 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
             clean_text_for_date = raw.replace(m_due.group(0), " ")
 
     # 1.2 Если первый шаблон не сработал, пробуем "в 7 вечера", "в 18:00"
-    # Группы: 1="часы", 2="минуты", 3="утра/дня/..."
     if not found_time:
         m_at = re.search(
             r"\b(?:в|на)\s+(\d{1,2})(?::(\d{2}))?\s*(?:часа|часов|час|ч)?\s*(утра|дня|вечера|ночи)?\b",
@@ -249,7 +246,7 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
         if m_at:
             hour = int(m_at.group(1))
             minute = int(m_at.group(2) or 0)
-            # ВОТ ТУТ БЫЛА ОШИБКА: берем группу 3, а не 4
+            # Группа 3 - это утра/дня/вечера
             mer = (m_at.group(3) or "").lower() 
 
             if mer in ("дня", "вечера") and 1 <= hour <= 11:
@@ -281,20 +278,16 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     extracted_phrase = ""
 
     if matches:
-        # dateparser нашел дату (например, "завтра" или "суббота")
         found_phrase, parse_dt = matches[-1]
         
         if found_time:
-            # Склеиваем дату от dateparser и время от regex
             final_dt = parse_dt.replace(hour=found_time.hour, minute=found_time.minute, second=0)
             extracted_phrase = found_phrase
         else:
-            # Только dateparser
             final_dt = parse_dt
             extracted_phrase = found_phrase
             
     else:
-        # dateparser не нашел дату, но есть время от regex
         if found_time:
             candidate = now.replace(
                 hour=found_time.hour, minute=found_time.minute, second=0, microsecond=0
@@ -303,9 +296,12 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
                 candidate += timedelta(days=1)
             final_dt = candidate
 
+    # --- ФИКС №2: Страховка TZINFO (от твоего кодера) ---
+    if final_dt and final_dt.tzinfo is None:
+        final_dt = final_dt.replace(tzinfo=LOCAL_TZ)
+
     # Формируем чистый текст задачи
     if final_dt:
-        # Удаляем куски времени/даты из текста
         raw_clean = raw
         if found_time and m_due:
             raw_clean = raw_clean.replace(m_due.group(0), "")
@@ -394,6 +390,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_edit_task_text(update, context, user_id, text, edit_task_id):
+    """
+    Обработка редактирования текста задачи.
+    ВНИМАНИЕ: Здесь внедрен ФИКС №1 (обновление JobQueue).
+    """
     row = get_task(user_id, edit_task_id)
     if not row:
         await update.message.reply_text("Задача не найдена.", reply_markup=MAIN_KEYBOARD)
@@ -406,13 +406,41 @@ async def process_edit_task_text(update, context, user_id, text, edit_task_id):
         new_text = old_text
 
     now = datetime.now(tz=LOCAL_TZ)
+    
+    # Определяем новый дедлайн (ISO)
     if new_due_dt is None:
         new_due_iso = old_due_iso
+        # Если дата не менялась в тексте, оставляем старую дату (объектом), 
+        # чтобы проверить, нужно ли перезапускать таймер.
+        # Но если old_due_iso есть, надо его распарсить.
+        current_due_dt = datetime.fromisoformat(old_due_iso).astimezone(LOCAL_TZ) if old_due_iso else None
     else:
-        new_due_iso = None if new_due_dt <= now else new_due_dt.isoformat()
+        if new_due_dt <= now:
+            new_due_iso = None
+            current_due_dt = None
+        else:
+            new_due_iso = new_due_dt.isoformat()
+            current_due_dt = new_due_dt
 
+    # Обновляем БД
     update_task_text(user_id, edit_task_id, new_text)
     update_task_due(user_id, edit_task_id, new_due_iso)
+
+    # --- ФИКС №1: Синхронизация JobQueue ---
+    # 1. Удаляем старый таймер (если он был)
+    remove_job_if_exists(str(edit_task_id), context)
+
+    # 2. Если есть актуальный дедлайн в будущем — создаем новый таймер
+    if current_due_dt and current_due_dt > now and context.job_queue:
+        delta = (current_due_dt - now).total_seconds()
+        context.job_queue.run_once(
+            send_reminder,
+            when=delta,
+            chat_id=user_id,
+            data={"task_id": edit_task_id, "task_text": new_text},
+            name=str(edit_task_id) # Обязательно имя!
+        )
+    # ---------------------------------------
 
     log_event(user_id=user_id, event_type="task_edited", task_id=edit_task_id)
     context.user_data.pop("edit_task_id", None)
@@ -577,6 +605,8 @@ async def on_reminder_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return
 
+    remove_job_if_exists(str(task_id), context)
+
     user_id = query.from_user.id
     set_task_done(user_id, task_id)
     log_event(user_id, "task_done_from_reminder", task_id)
@@ -612,9 +642,10 @@ async def on_reminder_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE)
         task_id, minutes = int(parts[1]), int(parts[2])
     except ValueError:
         return
-    
+
+    # Удаляем старый таймер перед созданием нового
     remove_job_if_exists(str(task_id), context)
-    
+
     user_id = query.from_user.id
     row = get_task(user_id, task_id)
     if not row:
@@ -670,8 +701,9 @@ async def on_set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_id = int(task_id_str)
     except ValueError: return
 
+    # Удаляем старый таймер перед созданием нового
     remove_job_if_exists(str(task_id), context)
-    
+
     user_id = query.from_user.id
     row = get_task(user_id, task_id)
     if not row:
@@ -793,7 +825,7 @@ async def on_done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError: return
 
     remove_job_if_exists(str(task_id), context)
-
+    
     user_id = query.from_user.id
     set_task_done(user_id, task_id)
     log_event(user_id, "task_marked_done", task_id)
