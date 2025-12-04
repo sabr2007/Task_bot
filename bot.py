@@ -215,7 +215,9 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
     raw = text.strip()
     now = datetime.now(tz=LOCAL_TZ)
 
-    # Хранилище для найденного времени
+    # Инициализация переменных (чтобы не было UnboundLocalError)
+    m_due = None
+    m_at = None
     found_time: Optional[dtime] = None
     
     # Текст, из которого мы будем вырезать найденные куски времени
@@ -246,7 +248,6 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
         if m_at:
             hour = int(m_at.group(1))
             minute = int(m_at.group(2) or 0)
-            # Группа 3 - это утра/дня/вечера
             mer = (m_at.group(3) or "").lower() 
 
             if mer in ("дня", "вечера") and 1 <= hour <= 11:
@@ -296,7 +297,7 @@ def parse_task_and_due(text: str) -> tuple[str, Optional[datetime]]:
                 candidate += timedelta(days=1)
             final_dt = candidate
 
-    # --- ФИКС №2: Страховка TZINFO (от твоего кодера) ---
+    # Страховка от naive datetime (если dateparser вернул без TZ)
     if final_dt and final_dt.tzinfo is None:
         final_dt = final_dt.replace(tzinfo=LOCAL_TZ)
 
@@ -392,7 +393,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_edit_task_text(update, context, user_id, text, edit_task_id):
     """
     Обработка редактирования текста задачи.
-    ВНИМАНИЕ: Здесь внедрен ФИКС №1 (обновление JobQueue).
+    ВНИМАНИЕ: Здесь внедрен фикс обновления JobQueue и страховка таймзон.
     """
     row = get_task(user_id, edit_task_id)
     if not row:
@@ -408,12 +409,19 @@ async def process_edit_task_text(update, context, user_id, text, edit_task_id):
     now = datetime.now(tz=LOCAL_TZ)
     
     # Определяем новый дедлайн (ISO)
+    current_due_dt = None # Дата для установки таймера
+
     if new_due_dt is None:
         new_due_iso = old_due_iso
-        # Если дата не менялась в тексте, оставляем старую дату (объектом), 
-        # чтобы проверить, нужно ли перезапускать таймер.
-        # Но если old_due_iso есть, надо его распарсить.
-        current_due_dt = datetime.fromisoformat(old_due_iso).astimezone(LOCAL_TZ) if old_due_iso else None
+        # Если дата не менялась в тексте, используем старую.
+        if old_due_iso:
+            try:
+                current_due_dt = datetime.fromisoformat(old_due_iso)
+                # Если старая дата вдруг без TZ, чиним
+                if current_due_dt.tzinfo is None:
+                    current_due_dt = current_due_dt.replace(tzinfo=LOCAL_TZ)
+            except ValueError:
+                current_due_dt = None
     else:
         if new_due_dt <= now:
             new_due_iso = None
@@ -426,7 +434,7 @@ async def process_edit_task_text(update, context, user_id, text, edit_task_id):
     update_task_text(user_id, edit_task_id, new_text)
     update_task_due(user_id, edit_task_id, new_due_iso)
 
-    # --- ФИКС №1: Синхронизация JobQueue ---
+    # --- Синхронизация JobQueue ---
     # 1. Удаляем старый таймер (если он был)
     remove_job_if_exists(str(edit_task_id), context)
 
